@@ -10,7 +10,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AlertDialog;
-
+import android.os.Handler;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -203,11 +203,20 @@ public class DashboardActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     try {
                         AlertDialog.Builder builder = new AlertDialog.Builder(this);
-                        builder.setTitle("🔍 Контроль качества");
+                        builder.setTitle("🔍 Контроль качества (" + qualityTasks.size() + " заданий)");
 
                         if (qualityTasks.isEmpty()) {
-                            builder.setMessage("Нет заданий для проверки качества");
-                            builder.setPositiveButton("OK", null);
+                            builder.setMessage("Нет заданий для проверки качества.\n\n" +
+                                    "Задания появятся здесь когда:\n" +
+                                    "✅ Статус задания = 'Выполнено'\n" +
+                                    "✅ Флаг проверки = 'Не проверено'\n" +
+                                    "✅ Есть выполненные работы\n\n" +
+                                    "Проверить отладку?");
+
+                            builder.setPositiveButton("Отладка", (dialog, which) -> {
+                                debugQualityControlTasks();
+                            });
+                            builder.setNegativeButton("OK", null);
                             builder.show();
                             return;
                         }
@@ -220,9 +229,12 @@ public class DashboardActivity extends AppCompatActivity {
                             String qualityStatus = task.qualityChecked ? "Проверено" : "Ожидает";
                             String workerInfo = task.workerName != null ? task.workerName : "Неизвестный работник";
                             String operationInfo = task.operationName != null ? task.operationName : "Неизвестная операция";
+                            String statusInfo = "completed".equals(task.status) ? "Завершено" : "В работе";
 
-                            taskItems[i] = String.format("%s %s - %s (%d шт) - %s",
-                                    statusIcon, workerInfo, operationInfo, task.actualQuantity, qualityStatus);
+                            taskItems[i] = String.format("%s %s - %s (%d/%d шт) - %s - %s",
+                                    statusIcon, workerInfo, operationInfo,
+                                    task.actualQuantity, task.plannedQuantity,
+                                    statusInfo, qualityStatus);
                         }
 
                         builder.setItems(taskItems, (dialog, which) -> {
@@ -234,8 +246,8 @@ public class DashboardActivity extends AppCompatActivity {
                             showBulkQualityCheckDialog(qualityTasks);
                         });
 
-                        builder.setNeutralButton("Статистика", (dialog, which) -> {
-                            showQualityStatistics();
+                        builder.setNeutralButton("Отладка", (dialog, which) -> {
+                            debugQualityControlTasks();
                         });
 
                         builder.setNegativeButton("Закрыть", null);
@@ -345,6 +357,176 @@ public class DashboardActivity extends AppCompatActivity {
         }
     }
 
+    // Массовая проверка качества всех заданий
+    private void performBulkQualityCheck(List<QualityControlItem> tasks) {
+        new Thread(() -> {
+            try {
+                int successCount = 0;
+                int totalTasks = tasks.size();
+
+                for (QualityControlItem task : tasks) {
+                    if (!task.qualityChecked) {
+                        boolean success = databaseHelper.checkAssignmentQuality(
+                                task.id, userId, task.actualQuantity, task.defects, "Массовая проверка"
+                        );
+                        if (success) successCount++;
+
+                        // Небольшая задержка для визуального эффекта
+                        Thread.sleep(100);
+                    }
+                }
+
+                final int finalSuccessCount = successCount;
+                final int finalTotalTasks = totalTasks;
+
+                runOnUiThread(() -> {
+                    String message;
+                    if (finalSuccessCount == finalTotalTasks) {
+                        message = String.format("✅ Успешно проверено %d/%d заданий", finalSuccessCount, finalTotalTasks);
+                    } else {
+                        message = String.format("⚠️ Проверено %d/%d заданий", finalSuccessCount, finalTotalTasks);
+                    }
+
+                    Toast.makeText(this, message, Toast.LENGTH_LONG).show();
+
+                    // Обновляем данные на экране
+                    if ("master".equals(userRole)) {
+                        loadMasterData();
+                    }
+
+                    Log.d("DashboardActivity", "📊 Массовая проверка завершена: " + finalSuccessCount + "/" + finalTotalTasks);
+                });
+            } catch (Exception e) {
+                Log.e("DashboardActivity", "❌ Ошибка массовой проверки: " + e.getMessage());
+                runOnUiThread(() -> Toast.makeText(this, "Ошибка массовой проверки", Toast.LENGTH_SHORT).show());
+            }
+        }).start();
+    }
+
+    // Массовая проверка качества всех заданий конкретного работника
+    private void performBulkWorkerQualityCheck(int workerId, String workerName) {
+        new Thread(() -> {
+            try {
+                boolean success = databaseHelper.bulkCheckWorkerQuality(workerId, userId, "Массовая проверка работника " + workerName);
+
+                runOnUiThread(() -> {
+                    if (success) {
+                        Toast.makeText(this, "✅ Все задания работника " + workerName + " проверены!", Toast.LENGTH_SHORT).show();
+                        // Обновляем данные на экране
+                        if ("master".equals(userRole)) {
+                            loadMasterData();
+                        }
+                    } else {
+                        Toast.makeText(this, "❌ Ошибка проверки заданий работника", Toast.LENGTH_SHORT).show();
+                    }
+                });
+            } catch (Exception e) {
+                Log.e("DashboardActivity", "❌ Ошибка массовой проверки работника: " + e.getMessage());
+                runOnUiThread(() -> Toast.makeText(this, "Ошибка проверки работника", Toast.LENGTH_SHORT).show());
+            }
+        }).start();
+    }
+    // Метод для отладки - показывает информацию о заданиях
+    private void debugQualityControlTasks() {
+        new Thread(() -> {
+            try {
+                List<QualityControlItem> tasks = databaseHelper.getQualityControlTasks();
+
+                runOnUiThread(() -> {
+                    StringBuilder debugInfo = new StringBuilder();
+                    debugInfo.append("🔍 ОТЛАДКА КОНТРОЛЯ КАЧЕСТВА:\n\n");
+                    debugInfo.append("Всего заданий: ").append(tasks.size()).append("\n\n");
+
+                    if (tasks.isEmpty()) {
+                        debugInfo.append("Нет заданий для контроля качества.\n");
+                        debugInfo.append("Проверьте:\n");
+                        debugInfo.append("• Статус заданий (должен быть 'completed')\n");
+                        debugInfo.append("• Флаг quality_checked (должен быть 0)\n");
+                        debugInfo.append("• Наличие выполненных работ\n");
+                    } else {
+                        for (int i = 0; i < tasks.size(); i++) {
+                            QualityControlItem task = tasks.get(i);
+                            debugInfo.append(i + 1).append(". ").append(task.operationName)
+                                    .append(" (").append(task.workerName).append(")\n")
+                                    .append("   Статус: ").append(task.status)
+                                    .append(", Проверено: ").append(task.qualityChecked ? "Да" : "Нет")
+                                    .append(", Выполнено: ").append(task.actualQuantity).append("/").append(task.plannedQuantity)
+                                    .append("\n\n");
+                        }
+                    }
+
+                    new AlertDialog.Builder(this)
+                            .setTitle("Отладка контроля качества")
+                            .setMessage(debugInfo.toString())
+                            .setPositiveButton("OK", null)
+                            .show();
+                });
+            } catch (Exception e) {
+                Log.e("DashboardActivity", "❌ Ошибка отладки: " + e.getMessage());
+            }
+        }).start();
+    }
+    // Диалог выбора работника для массовой проверки
+    private void showWorkersQualityCheckDialog() {
+        new Thread(() -> {
+            try {
+                List<Worker> workers = getBrigadeWorkers();
+                List<String> workerNames = new ArrayList<>();
+                List<Integer> workerIds = new ArrayList<>();
+
+                // Собираем список работников с непроверенными заданиями
+                for (Worker worker : workers) {
+                    List<QualityControlItem> workerTasks = databaseHelper.getWorkerQualityControlTasks(worker.id);
+                    int uncheckedCount = 0;
+                    for (QualityControlItem task : workerTasks) {
+                        if (!task.qualityChecked) {
+                            uncheckedCount++;
+                        }
+                    }
+
+                    if (uncheckedCount > 0) {
+                        workerNames.add(worker.name + " (" + uncheckedCount + " непроверенных)");
+                        workerIds.add(worker.id);
+                    }
+                }
+
+                final List<Integer> finalWorkerIds = workerIds;
+                final List<String> finalWorkerNames = new ArrayList<>();
+                for (Worker worker : workers) {
+                    finalWorkerNames.add(worker.name);
+                }
+
+                runOnUiThread(() -> {
+                    if (workerNames.isEmpty()) {
+                        Toast.makeText(this, "У всех работников все задания уже проверены", Toast.LENGTH_SHORT).show();
+                        return;
+                    }
+
+                    AlertDialog.Builder builder = new AlertDialog.Builder(this);
+                    builder.setTitle("Массовая проверка по работникам");
+                    builder.setItems(workerNames.toArray(new String[0]), (dialog, which) -> {
+                        int selectedWorkerId = finalWorkerIds.get(which);
+                        String selectedWorkerName = finalWorkerNames.get(which);
+
+                        // Подтверждение массовой проверки
+                        new AlertDialog.Builder(this)
+                                .setTitle("Подтверждение")
+                                .setMessage("Проверить все задания работника " + selectedWorkerName + "?")
+                                .setPositiveButton("Да", (d, w) -> {
+                                    performBulkWorkerQualityCheck(selectedWorkerId, selectedWorkerName);
+                                })
+                                .setNegativeButton("Отмена", null)
+                                .show();
+                    });
+                    builder.setNegativeButton("Отмена", null);
+                    builder.show();
+                });
+            } catch (Exception e) {
+                Log.e("DashboardActivity", "Ошибка показа диалога работников: " + e.getMessage());
+                runOnUiThread(() -> Toast.makeText(this, "Ошибка загрузки данных работников", Toast.LENGTH_SHORT).show());
+            }
+        }).start();
+    }
     // Массовая проверка качества
     private void showBulkQualityCheckDialog(List<QualityControlItem> tasks) {
         new Thread(() -> {
@@ -379,10 +561,13 @@ public class DashboardActivity extends AppCompatActivity {
         }).start();
     }
 
-    // Выполнение проверки качества
+    // Массовая проверка качества
+    // Обновите метод performQualityCheck для лучшего логирования
     private void performQualityCheck(int assignmentId, int checkerId, int approvedQuantity, int defectsFound, String notes, boolean isApproved) {
         new Thread(() -> {
             try {
+                Log.d("DashboardActivity", "🔍 Начало проверки качества для задания: " + assignmentId);
+
                 boolean success = databaseHelper.checkAssignmentQuality(assignmentId, checkerId, approvedQuantity, defectsFound, notes);
 
                 runOnUiThread(() -> {
@@ -394,43 +579,21 @@ public class DashboardActivity extends AppCompatActivity {
                         // Обновляем данные на экране
                         if ("master".equals(userRole)) {
                             loadMasterData();
+                            // Принудительно обновляем данные контроля качества
+                            refreshQualityControlData();
                         } else if ("worker".equals(userRole)) {
                             loadWorkerData();
                         }
+
+                        Log.d("DashboardActivity", "✅ Проверка качества завершена для задания: " + assignmentId);
                     } else {
                         Toast.makeText(this, "Ошибка проверки качества", Toast.LENGTH_SHORT).show();
+                        Log.e("DashboardActivity", "❌ Ошибка проверки качества для задания: " + assignmentId);
                     }
                 });
             } catch (Exception e) {
-                Log.e("DashboardActivity", "Ошибка проверки качества: " + e.getMessage());
+                Log.e("DashboardActivity", "❌ Ошибка проверки качества: " + e.getMessage());
                 runOnUiThread(() -> Toast.makeText(this, "Ошибка проверки качества", Toast.LENGTH_SHORT).show());
-            }
-        }).start();
-    }
-
-    // Массовая проверка качества
-    private void performBulkQualityCheck(List<QualityControlItem> tasks) {
-        new Thread(() -> {
-            try {
-                int successCount = 0;
-                for (QualityControlItem task : tasks) {
-                    boolean success = databaseHelper.checkAssignmentQuality(
-                            task.id, userId, task.actualQuantity, task.defects, "Массовая проверка"
-                    );
-                    if (success) successCount++;
-                }
-
-                final int finalSuccessCount = successCount;
-                runOnUiThread(() -> {
-                    String message = String.format("Проверено %d/%d заданий", finalSuccessCount, tasks.size());
-                    Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
-                    if ("master".equals(userRole)) {
-                        loadMasterData();
-                    }
-                });
-            } catch (Exception e) {
-                Log.e("DashboardActivity", "Ошибка массовой проверки: " + e.getMessage());
-                runOnUiThread(() -> Toast.makeText(this, "Ошибка массовой проверки", Toast.LENGTH_SHORT).show());
             }
         }).start();
     }
@@ -938,22 +1101,38 @@ public class DashboardActivity extends AppCompatActivity {
     }
 
     // Обновление статуса задания
+    // Обновление статуса задания
     private void updateAssignmentStatus(int assignmentId, String newStatus) {
         new Thread(() -> {
             try {
+                Log.d("DashboardActivity", "🔄 Попытка изменить статус задания " + assignmentId + " на: " + newStatus);
+
                 boolean success = databaseHelper.updateAssignmentStatus(assignmentId, newStatus);
 
                 runOnUiThread(() -> {
                     if (success) {
-                        Toast.makeText(this, "Статус обновлен в " + getCurrentTime() + "!", Toast.LENGTH_SHORT).show();
+                        String message = "Статус обновлен в " + getCurrentTime() + "!";
+                        if ("completed".equals(newStatus)) {
+                            message += "\nЗадание теперь в контроле качества!";
+                        }
+                        Toast.makeText(this, message, Toast.LENGTH_SHORT).show();
+
                         // Автоматически обновляем все данные
                         loadWorkerData();
+
+                        // Если статус изменен на "выполнено", обновляем контроль качества
+                        if ("completed".equals(newStatus) && "master".equals(userRole)) {
+                            // Небольшая задержка для обновления БД
+                            new Handler().postDelayed(() -> {
+                                loadMasterData();
+                            }, 500);
+                        }
                     } else {
                         Toast.makeText(this, "Ошибка обновления статуса", Toast.LENGTH_SHORT).show();
                     }
                 });
             } catch (Exception e) {
-                Log.e("DashboardActivity", "Ошибка обновления статуса: " + e.getMessage());
+                Log.e("DashboardActivity", "❌ Ошибка обновления статуса: " + e.getMessage());
                 runOnUiThread(() -> Toast.makeText(this, "Ошибка обновления статуса", Toast.LENGTH_SHORT).show());
             }
         }).start();
@@ -1418,6 +1597,7 @@ public class DashboardActivity extends AppCompatActivity {
         }).start();
     }
 
+
     // === ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ ДЛЯ МАСТЕРА ===
 
     private List<Assignment> getBrigadeActiveAssignments() {
@@ -1472,6 +1652,24 @@ public class DashboardActivity extends AppCompatActivity {
             operations.add(op3);
 
             return operations;
+        }
+    }
+    // В классе DashboardActivity добавьте этот метод
+    private void refreshQualityControlData() {
+        if ("master".equals(userRole)) {
+            new Thread(() -> {
+                try {
+                    // Принудительно обновляем данные контроля качества
+                    List<QualityControlItem> qualityTasks = databaseHelper.getQualityControlTasks();
+
+                    runOnUiThread(() -> {
+                        Log.d("DashboardActivity", "🔄 Данные контроля качества обновлены: " +
+                                qualityTasks.size() + " заданий");
+                    });
+                } catch (Exception e) {
+                    Log.e("DashboardActivity", "❌ Ошибка обновления данных контроля качества: " + e.getMessage());
+                }
+            }).start();
         }
     }
 

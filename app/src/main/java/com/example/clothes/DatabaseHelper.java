@@ -19,7 +19,7 @@ import java.util.Locale;
 
 public class DatabaseHelper extends SQLiteOpenHelper {
     private static final String DATABASE_NAME = "narek.db";
-    private static final int DATABASE_VERSION = 1;
+    private static final int DATABASE_VERSION = 2;
     private final Context context;
     private OnDataChangedListener onDataChangedListener;
 
@@ -32,6 +32,7 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         }
 
         debugDatabaseStructure();
+        debugAssignmentsTable();
     }
 
     private boolean isDatabaseExists() {
@@ -72,7 +73,53 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        // Не обновляем БД
+        try {
+            Log.d("DatabaseHelper", "🔄 Обновление БД с версии " + oldVersion + " на " + newVersion);
+
+            // Добавляем недостающие столбцы для контроля качества
+            if (oldVersion < 2) {
+                addMissingColumnsToAssignments(db);
+            }
+
+        } catch (Exception e) {
+            Log.e("DatabaseHelper", "❌ Ошибка обновления БД: " + e.getMessage());
+        }
+    }
+
+    private void addMissingColumnsToAssignments(SQLiteDatabase db) {
+        try {
+            // Проверяем существование столбцов
+            Cursor cursor = db.rawQuery("PRAGMA table_info(assignments)", null);
+            List<String> existingColumns = new ArrayList<>();
+            while (cursor.moveToNext()) {
+                existingColumns.add(cursor.getString(cursor.getColumnIndexOrThrow("name")));
+            }
+            cursor.close();
+
+            // Добавляем недостающие столбцы
+            if (!existingColumns.contains("quality_checked")) {
+                db.execSQL("ALTER TABLE assignments ADD COLUMN quality_checked INTEGER DEFAULT 0");
+                Log.d("DatabaseHelper", "✅ Добавлен столбец quality_checked");
+            }
+
+            if (!existingColumns.contains("quality_checker_id")) {
+                db.execSQL("ALTER TABLE assignments ADD COLUMN quality_checker_id INTEGER");
+                Log.d("DatabaseHelper", "✅ Добавлен столбец quality_checker_id");
+            }
+
+            if (!existingColumns.contains("quality_check_date")) {
+                db.execSQL("ALTER TABLE assignments ADD COLUMN quality_check_date TEXT");
+                Log.d("DatabaseHelper", "✅ Добавлен столбец quality_check_date");
+            }
+
+            if (!existingColumns.contains("quality_notes")) {
+                db.execSQL("ALTER TABLE assignments ADD COLUMN quality_notes TEXT");
+                Log.d("DatabaseHelper", "✅ Добавлен столбец quality_notes");
+            }
+
+        } catch (Exception e) {
+            Log.e("DatabaseHelper", "❌ Ошибка добавления столбцов: " + e.getMessage());
+        }
     }
 
     // === МЕТОДЫ ДЛЯ АУТЕНТИФИКАЦИИ И РЕГИСТРАЦИИ ===
@@ -253,25 +300,19 @@ public class DatabaseHelper extends SQLiteOpenHelper {
 
                 if (opName == null) opName = "Задание " + (count + 1);
 
-                String statusText = getStatusText(status);
-                String progressText = actual + "/" + planned + " шт";
-
-                // Добавляем цветовое кодирование в зависимости от статуса
-                String assignmentText = opName + "    " + progressText + " (" + statusText + ")";
-
-                assignments.append(assignmentText).append("\n");
+                assignments.append(opName).append("    ")
+                        .append(actual).append("/").append(planned).append(" шт")
+                        .append(" (").append(getStatusText(status)).append(")\n");
                 count++;
             }
             cursor.close();
 
-            // Если нет активных заданий, добавляем сообщение
-            if (count == 0) {
-                assignments.append("Нет активных заданий\n");
-            }
-
         } catch (Exception e) {
-            Log.e("DatabaseHelper", "❌ Ошибка получения активных заданий: " + e.getMessage());
-            assignments.append("Ошибка загрузки заданий\n");
+            Log.e("DatabaseHelper", "❌ Ошибка получения заданий: " + e.getMessage());
+        }
+
+        if (assignments.length() == 0) {
+            assignments.append("Нет активных заданий\n");
         }
 
         return assignments.toString();
@@ -409,60 +450,91 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         SQLiteDatabase db = this.getReadableDatabase();
         Assignment assignment = null;
 
-        Cursor cursor = db.query("assignments",
-                new String[]{"id", "planned_quantity", "actual_quantity", "defects", "status"},
-                "id = ?", new String[]{String.valueOf(assignmentId)},
-                null, null, null);
+        try {
+            String query = "SELECT a.id, o.name as operation_name, " +
+                    "a.planned_quantity, a.actual_quantity, a.defects, a.status, " +
+                    "p.name as product_name, a.start_time, a.end_time " +
+                    "FROM assignments a " +
+                    "JOIN operations o ON a.operation_id = o.id " +
+                    "LEFT JOIN products p ON o.product_id = p.id " +
+                    "WHERE a.id = ?";
 
-        if (cursor != null && cursor.moveToFirst()) {
-            assignment = new Assignment();
-            assignment.id = cursor.getInt(cursor.getColumnIndexOrThrow("id"));
-            assignment.plannedQuantity = cursor.getInt(cursor.getColumnIndexOrThrow("planned_quantity"));
-            assignment.actualQuantity = cursor.getInt(cursor.getColumnIndexOrThrow("actual_quantity"));
-            assignment.defects = cursor.getInt(cursor.getColumnIndexOrThrow("defects"));
-            assignment.status = cursor.getString(cursor.getColumnIndexOrThrow("status"));
-            cursor.close();
+            Cursor cursor = db.rawQuery(query, new String[]{String.valueOf(assignmentId)});
+            if (cursor != null && cursor.moveToFirst()) {
+                assignment = new Assignment();
+                assignment.id = cursor.getInt(cursor.getColumnIndexOrThrow("id"));
+                assignment.operationName = cursor.getString(cursor.getColumnIndexOrThrow("operation_name"));
+                assignment.plannedQuantity = cursor.getInt(cursor.getColumnIndexOrThrow("planned_quantity"));
+                assignment.actualQuantity = cursor.getInt(cursor.getColumnIndexOrThrow("actual_quantity"));
+                assignment.defects = cursor.getInt(cursor.getColumnIndexOrThrow("defects"));
+                assignment.status = cursor.getString(cursor.getColumnIndexOrThrow("status"));
+                assignment.productName = cursor.getString(cursor.getColumnIndexOrThrow("product_name"));
+                assignment.startTime = cursor.getString(cursor.getColumnIndexOrThrow("start_time"));
+                assignment.endTime = cursor.getString(cursor.getColumnIndexOrThrow("end_time"));
+            }
+
+            if (cursor != null) {
+                cursor.close();
+            }
+        } catch (Exception e) {
+            Log.e("DatabaseHelper", "❌ Ошибка получения задания по ID: " + e.getMessage());
         }
 
-        if (cursor != null) {
-            cursor.close();
-        }
         return assignment;
     }
 
     public boolean updateAssignmentStatus(int assignmentId, String newStatus) {
         SQLiteDatabase db = this.getWritableDatabase();
-        ContentValues values = new ContentValues();
-
-        if (!isValidStatus(newStatus)) {
-            Log.e("DatabaseHelper", "❌ Неверный статус: " + newStatus);
-            return false;
-        }
-
-        values.put("status", newStatus);
-
-        if ("in_progress".equals(newStatus)) {
-            values.put("start_time", getCurrentDateTime());
-        } else if ("completed".equals(newStatus)) {
-            values.put("end_time", getCurrentDateTime());
-        }
 
         try {
+            // Сначала проверим существование задания
+            Cursor cursor = db.query("assignments",
+                    new String[]{"id", "planned_quantity", "actual_quantity"},
+                    "id = ?", new String[]{String.valueOf(assignmentId)},
+                    null, null, null);
+
+            if (cursor == null || !cursor.moveToFirst()) {
+                Log.e("DatabaseHelper", "❌ Задание не найдено: " + assignmentId);
+                if (cursor != null) cursor.close();
+                return false;
+            }
+            cursor.close();
+
+            ContentValues values = new ContentValues();
+            values.put("status", newStatus);
+
+            if ("in_progress".equals(newStatus)) {
+                values.put("start_time", getCurrentDateTime());
+            } else if ("completed".equals(newStatus)) {
+                values.put("end_time", getCurrentDateTime());
+                Log.d("DatabaseHelper", "✅ Задание " + assignmentId + " помечено как выполненное");
+            }
+
             int rowsAffected = db.update("assignments", values, "id = ?", new String[]{String.valueOf(assignmentId)});
 
             // Уведомляем об изменении статуса
             if (rowsAffected > 0 && onDataChangedListener != null) {
                 onDataChangedListener.onAssignmentStatusChanged(assignmentId, newStatus);
+
+                // Дополнительно уведомляем о возможности проверки качества для завершенных заданий
+                if ("completed".equals(newStatus)) {
+                    onDataChangedListener.onQualityCheckPerformed(assignmentId);
+                    Log.d("DatabaseHelper", "🔔 Уведомление о новом задании для контроля качества: " + assignmentId);
+                }
             }
 
             Log.d("DatabaseHelper", "🔄 Обновление статуса задания " + assignmentId + " на '" + newStatus + "': " +
-                    (rowsAffected > 0 ? "успешно" : "ошибка"));
+                    (rowsAffected > 0 ? "успешно" : "ошибка") + ", затронуто строк: " + rowsAffected);
             return rowsAffected > 0;
+
         } catch (Exception e) {
             Log.e("DatabaseHelper", "❌ Ошибка обновления статуса: " + e.getMessage());
+            e.printStackTrace();
             return false;
         } finally {
-            db.close();
+            if (db != null) {
+                db.close();
+            }
         }
     }
 
@@ -523,10 +595,15 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             // Уведомляем об изменении данных
             if (rowsAffected > 0 && onDataChangedListener != null) {
                 onDataChangedListener.onAssignmentStatusChanged(assignmentId, newStatus);
+
+                // Если задание завершено, дополнительно уведомляем о возможности проверки качества
+                if ("completed".equals(newStatus)) {
+                    onDataChangedListener.onQualityCheckPerformed(assignmentId);
+                }
             }
 
             Log.d("DatabaseHelper", "📝 Учет выполнения задания " + assignmentId + ": +" + quantity + " шт, брак: " + defects +
-                    " -> " + (rowsAffected > 0 ? "успешно" : "ошибка"));
+                    " -> " + (rowsAffected > 0 ? "успешно" : "ошибка") + ", новый статус: " + newStatus);
 
             return rowsAffected > 0;
 
@@ -545,17 +622,20 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         List<QualityControlItem> tasks = new ArrayList<>();
 
         try {
+            // Используем таблицу quality_checks для контроля качества
             String query = "SELECT a.id, u.name as worker_name, o.name as operation_name, " +
                     "p.name as product_name, a.planned_quantity, a.actual_quantity, " +
                     "a.defects, a.status, a.created_at, a.start_time, a.end_time, " +
-                    "a.quality_checked, a.quality_checker_id, a.quality_check_date, " +
-                    "a.quality_notes " +
+                    "qc.result as quality_result, qc.defects_found, qc.comments as quality_notes, " +
+                    "qc.check_date as quality_check_date, qc.inspector_id as quality_checker_id, " +
+                    "CASE WHEN qc.id IS NOT NULL THEN 1 ELSE 0 END as quality_checked " +
                     "FROM assignments a " +
                     "JOIN users u ON a.user_id = u.id " +
                     "JOIN operations o ON a.operation_id = o.id " +
                     "LEFT JOIN products p ON o.product_id = p.id " +
-                    "WHERE a.status IN ('completed', 'in_progress') " +
-                    "ORDER BY a.quality_checked ASC, a.status DESC, a.end_time DESC";
+                    "LEFT JOIN quality_checks qc ON a.id = qc.assignment_id " +
+                    "WHERE a.status = 'completed' " +
+                    "ORDER BY qc.check_date DESC, a.end_time DESC";
 
             Cursor cursor = db.rawQuery(query, null);
             while (cursor.moveToNext()) {
@@ -571,7 +651,10 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 task.createdAt = cursor.getString(cursor.getColumnIndexOrThrow("created_at"));
                 task.startTime = cursor.getString(cursor.getColumnIndexOrThrow("start_time"));
                 task.endTime = cursor.getString(cursor.getColumnIndexOrThrow("end_time"));
-                task.qualityChecked = cursor.getInt(cursor.getColumnIndexOrThrow("quality_checked")) == 1;
+
+                // Используем данные из quality_checks
+                String qualityResult = cursor.getString(cursor.getColumnIndexOrThrow("quality_result"));
+                task.qualityChecked = qualityResult != null;
                 task.qualityCheckerId = cursor.getInt(cursor.getColumnIndexOrThrow("quality_checker_id"));
                 task.qualityCheckDate = cursor.getString(cursor.getColumnIndexOrThrow("quality_check_date"));
                 task.qualityNotes = cursor.getString(cursor.getColumnIndexOrThrow("quality_notes"));
@@ -587,7 +670,6 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         }
         return tasks;
     }
-
     public List<QualityControlItem> getWorkerQualityControlTasks(int workerId) {
         SQLiteDatabase db = getReadableDatabase();
         List<QualityControlItem> tasks = new ArrayList<>();
@@ -596,14 +678,16 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             String query = "SELECT a.id, u.name as worker_name, o.name as operation_name, " +
                     "p.name as product_name, a.planned_quantity, a.actual_quantity, " +
                     "a.defects, a.status, a.created_at, a.start_time, a.end_time, " +
-                    "a.quality_checked, a.quality_checker_id, a.quality_check_date, " +
-                    "a.quality_notes " +
+                    "qc.result as quality_result, qc.defects_found, qc.comments as quality_notes, " +
+                    "qc.check_date as quality_check_date, qc.inspector_id as quality_checker_id, " +
+                    "CASE WHEN qc.id IS NOT NULL THEN 1 ELSE 0 END as quality_checked " +
                     "FROM assignments a " +
                     "JOIN users u ON a.user_id = u.id " +
                     "JOIN operations o ON a.operation_id = o.id " +
                     "LEFT JOIN products p ON o.product_id = p.id " +
-                    "WHERE a.user_id = ? AND a.status IN ('completed', 'in_progress') " +
-                    "ORDER BY a.status DESC, a.end_time DESC";
+                    "LEFT JOIN quality_checks qc ON a.id = qc.assignment_id " +
+                    "WHERE a.user_id = ? AND a.status = 'completed' " +
+                    "ORDER BY qc.check_date DESC, a.end_time DESC";
 
             Cursor cursor = db.rawQuery(query, new String[]{String.valueOf(workerId)});
             while (cursor.moveToNext()) {
@@ -619,7 +703,10 @@ public class DatabaseHelper extends SQLiteOpenHelper {
                 task.createdAt = cursor.getString(cursor.getColumnIndexOrThrow("created_at"));
                 task.startTime = cursor.getString(cursor.getColumnIndexOrThrow("start_time"));
                 task.endTime = cursor.getString(cursor.getColumnIndexOrThrow("end_time"));
-                task.qualityChecked = cursor.getInt(cursor.getColumnIndexOrThrow("quality_checked")) == 1;
+
+                // Используем данные из quality_checks
+                String qualityResult = cursor.getString(cursor.getColumnIndexOrThrow("quality_result"));
+                task.qualityChecked = qualityResult != null;
                 task.qualityCheckerId = cursor.getInt(cursor.getColumnIndexOrThrow("quality_checker_id"));
                 task.qualityCheckDate = cursor.getString(cursor.getColumnIndexOrThrow("quality_check_date"));
                 task.qualityNotes = cursor.getString(cursor.getColumnIndexOrThrow("quality_notes"));
@@ -628,43 +715,41 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             }
             cursor.close();
 
-            Log.d("DatabaseHelper", "✅ Найдено заданий работника для контроля качества: " + tasks.size());
+            Log.d("DatabaseHelper", "✅ Найдено заданий работника " + workerId + " для контроля качества: " + tasks.size());
 
         } catch (Exception e) {
             Log.e("DatabaseHelper", "❌ Ошибка получения заданий работника: " + e.getMessage());
         }
         return tasks;
     }
-
     public boolean checkAssignmentQuality(int assignmentId, int checkerId, int approvedQuantity, int defectsFound, String notes) {
         SQLiteDatabase db = getWritableDatabase();
 
         try {
-            ContentValues values = new ContentValues();
-            values.put("quality_checked", 1);
-            values.put("quality_checker_id", checkerId);
-            values.put("quality_check_date", getCurrentDateTime());
-            values.put("actual_quantity", approvedQuantity);
-            values.put("defects", defectsFound);
-            values.put("quality_notes", notes);
+            // Обновляем основную таблицу assignments
+            ContentValues assignmentValues = new ContentValues();
+            assignmentValues.put("actual_quantity", approvedQuantity);
+            assignmentValues.put("defects", defectsFound);
 
-            // Если количество одобрено равно 0, помечаем как отклонено
-            if (approvedQuantity == 0) {
-                values.put("status", "cancelled");
-            }
+            int rowsAffected = db.update("assignments", assignmentValues, "id = ?", new String[]{String.valueOf(assignmentId)});
 
-            int rowsAffected = db.update("assignments", values, "id = ?", new String[]{String.valueOf(assignmentId)});
+            // Добавляем запись в таблицу quality_checks
+            ContentValues qualityValues = new ContentValues();
+            qualityValues.put("assignment_id", assignmentId);
+            qualityValues.put("inspector_id", checkerId);
+            qualityValues.put("result", approvedQuantity > 0 ? "approved" : "rejected");
+            qualityValues.put("defects_found", defectsFound);
+            qualityValues.put("comments", notes);
+            qualityValues.put("check_date", getCurrentDateTime());
 
-            boolean success = rowsAffected > 0;
+            long qualityResult = db.insert("quality_checks", null, qualityValues);
+
+            boolean success = rowsAffected > 0 && qualityResult != -1;
             if (success) {
-                // Уведомляем о проверке качества
                 if (onDataChangedListener != null) {
                     onDataChangedListener.onQualityCheckPerformed(assignmentId);
                 }
-                Log.d("DatabaseHelper", "✅ Контроль качества выполнен для задания " + assignmentId +
-                        ": approved=" + approvedQuantity + ", defects=" + defectsFound);
-            } else {
-                Log.e("DatabaseHelper", "❌ Ошибка контроля качества для задания " + assignmentId);
+                Log.d("DatabaseHelper", "✅ Контроль качества выполнен для задания " + assignmentId);
             }
 
             return success;
@@ -674,36 +759,56 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             return false;
         }
     }
-
+    // === МЕТОД ДЛЯ МАССОВОЙ ПРОВЕРКИ КАЧЕСТВА ===
     public boolean bulkCheckWorkerQuality(int workerId, int checkerId, String notes) {
         SQLiteDatabase db = getWritableDatabase();
 
         try {
-            ContentValues values = new ContentValues();
-            values.put("quality_checked", 1);
-            values.put("quality_checker_id", checkerId);
-            values.put("quality_check_date", getCurrentDateTime());
-            values.put("quality_notes", notes);
+            // Находим все завершенные задания работника без проверки качества
+            Cursor cursor = db.rawQuery(
+                    "SELECT a.id, a.actual_quantity, a.defects " +
+                            "FROM assignments a " +
+                            "LEFT JOIN quality_checks qc ON a.id = qc.assignment_id " +
+                            "WHERE a.user_id = ? AND a.status = 'completed' AND qc.id IS NULL",
+                    new String[]{String.valueOf(workerId)}
+            );
 
-            int rowsAffected = db.update("assignments", values,
-                    "user_id = ? AND status IN ('completed', 'in_progress') AND quality_checked = 0",
-                    new String[]{String.valueOf(workerId)});
+            int successCount = 0;
+            while (cursor.moveToNext()) {
+                int assignmentId = cursor.getInt(cursor.getColumnIndexOrThrow("id"));
+                int actualQuantity = cursor.getInt(cursor.getColumnIndexOrThrow("actual_quantity"));
+                int defects = cursor.getInt(cursor.getColumnIndexOrThrow("defects"));
 
-            boolean success = rowsAffected > 0;
+                ContentValues values = new ContentValues();
+                values.put("assignment_id", assignmentId);
+                values.put("inspector_id", checkerId);
+                values.put("result", "approved");
+                values.put("defects_found", defects);
+                values.put("comments", notes);
+                values.put("check_date", getCurrentDateTime());
+
+                long result = db.insert("quality_checks", null, values);
+                if (result != -1) {
+                    successCount++;
+                }
+            }
+            cursor.close();
+
+            boolean success = successCount > 0;
             if (success && onDataChangedListener != null) {
-                onDataChangedListener.onQualityCheckPerformed(-1); // -1 означает массовую проверку
+                onDataChangedListener.onQualityCheckPerformed(-1);
             }
 
-            Log.d("DatabaseHelper", "✅ Массовая проверка качества для worker " + workerId +
-                    ": обработано " + rowsAffected + " заданий");
+            Log.d("DatabaseHelper", "✅ Массовая проверка: " + successCount + " заданий работника " + workerId);
 
             return success;
 
         } catch (Exception e) {
-            Log.e("DatabaseHelper", "❌ Ошибка массовой проверки качества: " + e.getMessage());
+            Log.e("DatabaseHelper", "❌ Ошибка массовой проверки: " + e.getMessage());
             return false;
         }
     }
+
 
     public QualityStats getQualityStats() {
         SQLiteDatabase db = getReadableDatabase();
@@ -712,12 +817,13 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         try {
             String query = "SELECT " +
                     "COUNT(*) as total_assignments, " +
-                    "SUM(CASE WHEN quality_checked = 1 THEN 1 ELSE 0 END) as checked_assignments, " +
-                    "SUM(actual_quantity) as total_completed, " +
-                    "SUM(defects) as total_defects, " +
-                    "COUNT(DISTINCT user_id) as total_workers " +
-                    "FROM assignments " +
-                    "WHERE status IN ('completed', 'in_progress')";
+                    "SUM(CASE WHEN qc.id IS NOT NULL THEN 1 ELSE 0 END) as checked_assignments, " +
+                    "SUM(a.actual_quantity) as total_completed, " +
+                    "SUM(a.defects) as total_defects, " +
+                    "COUNT(DISTINCT a.user_id) as total_workers " +
+                    "FROM assignments a " +
+                    "LEFT JOIN quality_checks qc ON a.id = qc.assignment_id " +
+                    "WHERE a.status = 'completed'";
 
             Cursor cursor = db.rawQuery(query, null);
             if (cursor.moveToFirst()) {
@@ -747,12 +853,13 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         try {
             String query = "SELECT u.id, u.name, u.position, " +
                     "COUNT(a.id) as total_assignments, " +
-                    "SUM(CASE WHEN a.quality_checked = 1 THEN 1 ELSE 0 END) as checked_assignments, " +
+                    "SUM(CASE WHEN qc.id IS NOT NULL THEN 1 ELSE 0 END) as checked_assignments, " +
                     "SUM(a.actual_quantity) as total_completed, " +
                     "SUM(a.defects) as total_defects " +
                     "FROM users u " +
                     "LEFT JOIN assignments a ON u.id = a.user_id " +
-                    "WHERE u.role = 'worker' AND a.status IN ('completed', 'in_progress') " +
+                    "LEFT JOIN quality_checks qc ON a.id = qc.assignment_id " +
+                    "WHERE u.role = 'worker' AND a.status = 'completed' " +
                     "GROUP BY u.id, u.name, u.position " +
                     "ORDER BY total_completed DESC";
 
@@ -775,28 +882,6 @@ public class DatabaseHelper extends SQLiteOpenHelper {
             Log.e("DatabaseHelper", "❌ Ошибка получения статистики работников: " + e.getMessage());
         }
         return workerStats;
-    }
-
-    // === МЕТОДЫ ДЛЯ REAL-TIME ОБНОВЛЕНИЙ ===
-
-    public WorkerStats getWorkerStatsRealTime(int userId) {
-        WorkerStats stats = getWorkerStats(userId);
-
-        if (onDataChangedListener != null) {
-            onDataChangedListener.onWorkerStatsUpdated(userId, stats);
-        }
-
-        return stats;
-    }
-
-    public List<Assignment> getAvailableAssignmentsRealTime(int userId) {
-        List<Assignment> assignments = getAvailableAssignments(userId);
-
-        if (onDataChangedListener != null) {
-            onDataChangedListener.onAssignmentsUpdated(userId, assignments);
-        }
-
-        return assignments;
     }
 
     // === ИНТЕРФЕЙС ДЛЯ ОБНОВЛЕНИЯ UI ===
@@ -1285,6 +1370,25 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         }
     }
 
+    // Отладка структуры таблицы assignments
+    public void debugAssignmentsTable() {
+        SQLiteDatabase db = getReadableDatabase();
+        try {
+            Log.d("DatabaseDebug", "=== СТРУКТУРА ТАБЛИЦЫ ASSIGNMENTS ===");
+
+            Cursor cursor = db.rawQuery("PRAGMA table_info(assignments)", null);
+            while (cursor.moveToNext()) {
+                String columnName = cursor.getString(cursor.getColumnIndexOrThrow("name"));
+                String columnType = cursor.getString(cursor.getColumnIndexOrThrow("type"));
+                Log.d("DatabaseDebug", "Столбец: " + columnName + " | Тип: " + columnType);
+            }
+            cursor.close();
+
+        } catch (Exception e) {
+            Log.e("DatabaseDebug", "❌ Ошибка проверки структуры таблицы: " + e.getMessage());
+        }
+    }
+
     // === ВНУТРЕННИЕ КЛАССЫ МОДЕЛЕЙ ДАННЫХ ===
 
     public static class User {
@@ -1509,19 +1613,5 @@ public class DatabaseHelper extends SQLiteOpenHelper {
         public String name;
 
         public Product() {}
-    }
-
-    // Метод для конвертации User из DatabaseHelper в User приложения
-    public User convertToUser(DatabaseHelper.User dbUser) {
-        if (dbUser == null) return null;
-        return new User(
-                dbUser.getId(),
-                dbUser.getName(),
-                dbUser.getEmail(),
-                dbUser.getRole(),
-                dbUser.getBrigade(),
-                dbUser.getPosition(),
-                dbUser.getAvatarUrl()
-        );
     }
 }
